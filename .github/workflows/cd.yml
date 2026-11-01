@@ -1,0 +1,63 @@
+name: cd
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/cd.yml"]
+
+# Only one apply at a time, and never cancel one that has started.
+concurrency:
+  group: cd-apply
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  TF_IN_AUTOMATION: "true"
+  WORKING_DIR: infra/iam
+  APPLY_ROLE_ARN: arn:aws:iam::963910217939:role/cicd/cob-github-terraform
+
+defaults:
+  run:
+    working-directory: ${{ env.WORKING_DIR }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  apply:
+    name: plan + apply
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # - name: Allow Terraform to clone private modules
+      #   run: git config --global url."https://x-access-token:${{ secrets.MODULES_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+
+      # Trusts only: repo:<org>/<repo>:ref:refs/heads/main
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-apply-${{ github.run_id }}
+
+      - run: terraform init -input=false
+      - run: terraform validate
+      - run: terraform plan -input=false -lock-timeout=60s -out=tfplan
+
+      - name: Show plan in the run summary
+        run: |
+          {
+            echo '### Applying (`${{ env.WORKING_DIR }}`)'
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Applies exactly the plan produced above, nothing newer.
+      - run: terraform apply -input=false -lock-timeout=60s tfplan

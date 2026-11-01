@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  pull_request:
+    paths: ["infra/**", ".github/workflows/ci.yml"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: eu-west-2
+  TF_IN_AUTOMATION: "true"
+  WORKING_DIR: infra/iam
+  PLAN_ROLE_ARN: arn:aws:iam::963910217939:role/cicd/cob-github-terraform-plan
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+      # Checks every .tf file under infra/, not just one stack.
+      - name: terraform fmt
+        working-directory: infra
+        run: terraform fmt -check -recursive -diff
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uncomment if cob-terraform-modules-aws is a PRIVATE repo.
+      # - name: Allow Terraform to clone private modules
+      #   run: git config --global url."https://x-access-token:${{ secrets.MODULES_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
+  plan:
+    name: plan (read-only)
+    needs: [fmt, validate]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # - name: Allow Terraform to clone private modules
+      #   run: git config --global url."https://x-access-token:${{ secrets.MODULES_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      - run: terraform init -input=false
+      - run: terraform plan -input=false -lock-timeout=60s -out=tfplan
+
+      - name: Show plan in the run summary
+        run: |
+          {
+            echo '### Terraform plan (`${{ env.WORKING_DIR }}`)'
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
