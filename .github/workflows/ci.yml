@@ -1,0 +1,121 @@
+name: ci
+
+on:
+  pull_request:
+
+# A newer push to the same PR cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: eu-west-2
+  TF_IN_AUTOMATION: "true"
+  WORKING_DIR: infra/iam
+  PLAN_ROLE_ARN: arn:aws:iam::963910217939:role/cicd/cob-github-terraform-plan
+
+# Read-only by default. Only the plan job asks for an OIDC token.
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+
+      # Checks every .tf file under infra/, not just one stack.
+      - name: terraform fmt
+        working-directory: infra
+        run: terraform fmt -check -recursive -diff
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Uncomment if cob-terraform-modules-aws is a PRIVATE repo.
+      # Store a read-only token as the repo secret MODULES_REPO_TOKEN.
+      # - name: Allow Terraform to clone private modules
+      #   run: git config --global url."https://x-access-token:${{ secrets.MODULES_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+
+      # No AWS credentials and no tfvars needed: no backend, no API calls,
+      # and validate does not ask for variable values.
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
+  plan:
+    name: plan (read-only)
+    needs: [fmt, validate]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # request the OIDC token for AWS
+      contents: read    # repeated: a job-level block replaces the workflow-level one
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # - name: Allow Terraform to clone private modules
+      #   run: git config --global url."https://x-access-token:${{ secrets.MODULES_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10.0"
+          terraform_wrapper: false
+
+      # terraform.tfvars is not committed, so rebuild it from the repository variable.
+      - name: Write terraform.tfvars
+        env:
+          TFVARS_CONTENT: ${{ vars.TFVARS_DEV }}
+        run: |
+          test -n "$TFVARS_CONTENT" || { echo "Repository variable TFVARS_DEV is missing or empty"; exit 1; }
+          printf '%s\n' "$TFVARS_CONTENT" > terraform.tfvars
+
+      # Role trusts only: repo:<org>/cob-aws-infrastructure:pull_request
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      - name: Debug OIDC claims (temporary)
+        run: |
+            python3 - <<'PY'
+            import os, json, base64, urllib.request
+            url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
+            req = urllib.request.Request(url, headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+            tok = json.load(urllib.request.urlopen(req))["value"]
+            p = tok.split(".")[1]
+            p += "=" * (-len(p) % 4)
+            c = json.loads(base64.urlsafe_b64decode(p))
+            print({k: c[k] for k in ("sub", "aud", "iss", "repository", "event_name") if k in c})
+            PY
+
+      - run: terraform init -input=false
+      - run: terraform plan -input=false -lock-timeout=60s -out=tfplan
+
+      - name: Show plan in the run summary
+        run: |
+          {
+            echo '### Terraform plan (`${{ env.WORKING_DIR }}`)'
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
