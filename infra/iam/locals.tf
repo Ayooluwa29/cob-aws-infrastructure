@@ -1,8 +1,8 @@
 data "aws_caller_identity" "current" {}
 
 locals {
-  prefix     = "cob-dev"
-  region     = "eu-west-2"
+  prefix     = "${var.project}-${var.environment}"
+  region     = var.region
   account_id = data.aws_caller_identity.current.account_id
 
   # ---- S3 ----
@@ -35,7 +35,7 @@ locals {
     "arn:aws:ecs:${local.region}:${local.account_id}:service/${local.prefix}-*/*",
     "arn:aws:ecs:${local.region}:${local.account_id}:task/${local.prefix}-*/*",
   ]
-  ecr_repos = ["arn:aws:ecr:${local.region}:${local.account_id}:repository/${local.prefix}-*"]
+  ecr_repos     = ["arn:aws:ecr:${local.region}:${local.account_id}:repository/${local.prefix}-*"]
   ec2_instances = ["arn:aws:ec2:${local.region}:${local.account_id}:instance/*"]
 
   log_groups = flatten([
@@ -48,7 +48,7 @@ locals {
   # ---- Reusable conditions ----
   region_only = [{ test = "StringEquals", variable = "aws:RequestedRegion", values = [local.region] }]
   project_tagged = [
-    { test = "StringEquals", variable = "aws:ResourceTag/Project", values = ["COB"] },
-    { test = "StringEquals", variable = "aws:ResourceTag/Environment", values = ["dev"] },
+    { test = "StringEquals", variable = "aws:ResourceTag/Project", values = [upper(var.project)] },
+    { test = "StringEquals", variable = "aws:ResourceTag/Environment", values = [var.environment] },
   ]
 }

@@ -10,7 +10,7 @@ terraform {
 
   backend "s3" {
     bucket       = "cob-bstrap-tfstate"
-    key          = "envs/dev/iam/terraform.tfstate" # must start with envs/ to match the plan role's state access
+    key          = "envs/dev/iam/terraform.tfstate"
     region       = "eu-west-2"
     encrypt      = true
     use_lockfile = true
@@ -18,7 +18,7 @@ terraform {
 }
 
 provider "aws" {
-  region = "eu-west-2"
+  region = var.region
 }
 
 module "iam" {
@@ -26,7 +26,7 @@ module "iam" {
   source = "git::https://github.com/Ayooluwa29/cob-terraform-modules-aws.git//modules/iam?ref=main"
 
   name_prefix = "${local.prefix}-"
-  tags        = { Project = "COB", Environment = "dev", ManagedBy = "terraform", Stack = "iam" }
+  tags        = { Project = upper(var.project), Environment = var.environment, ManagedBy = "terraform", Stack = "iam" }
 
   policies = local.policies
   groups   = local.groups

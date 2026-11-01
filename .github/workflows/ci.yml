@@ -2,8 +2,8 @@ name: ci
 
 on:
   pull_request:
-    paths: ["infra/**", ".github/workflows/ci.yml"]
 
+# A newer push to the same PR cancels the older run.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -14,8 +14,8 @@ env:
   WORKING_DIR: infra/iam
   PLAN_ROLE_ARN: arn:aws:iam::963910217939:role/cicd/cob-github-terraform-plan
 
+# Read-only by default. Only the plan job asks for an OIDC token.
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -24,10 +24,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.10.0"
           terraform_wrapper: false
+
       # Checks every .tf file under infra/, not just one stack.
       - name: terraform fmt
         working-directory: infra
@@ -43,6 +45,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Uncomment if cob-terraform-modules-aws is a PRIVATE repo.
+      # Store a read-only token as the repo secret MODULES_REPO_TOKEN.
       # - name: Allow Terraform to clone private modules
       #   run: git config --global url."https://x-access-token:${{ secrets.MODULES_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
@@ -50,6 +53,9 @@ jobs:
         with:
           terraform_version: "~1.10.0"
           terraform_wrapper: false
+
+      # No AWS credentials and no tfvars needed: no backend, no API calls,
+      # and validate does not ask for variable values.
       - run: terraform init -backend=false -input=false
       - run: terraform validate
 
@@ -57,6 +63,9 @@ jobs:
     name: plan (read-only)
     needs: [fmt, validate]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # request the OIDC token for AWS
+      contents: read    # repeated: a job-level block replaces the workflow-level one
     defaults:
       run:
         working-directory: ${{ env.WORKING_DIR }}
@@ -71,6 +80,15 @@ jobs:
           terraform_version: "~1.10.0"
           terraform_wrapper: false
 
+      # terraform.tfvars is not committed, so rebuild it from the repository variable.
+      - name: Write terraform.tfvars
+        env:
+          TFVARS_CONTENT: ${{ vars.TFVARS_DEV }}
+        run: |
+          test -n "$TFVARS_CONTENT" || { echo "Repository variable TFVARS_DEV is missing or empty"; exit 1; }
+          printf '%s\n' "$TFVARS_CONTENT" > terraform.tfvars
+
+      # Role trusts only: repo:<org>/cob-aws-infrastructure:pull_request
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.PLAN_ROLE_ARN }}

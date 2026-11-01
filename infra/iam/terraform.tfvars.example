@@ -1,0 +1,3 @@
+project     = "cob"
+environment = "dev"
+region      = "eu-west-2"
